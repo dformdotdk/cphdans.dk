@@ -49,14 +49,26 @@ class PlgContentSchema extends CMSPlugin
      */
     public function onContentPrepare(string $context, &$article, &$params, $page = 0): void
     {
-        if (!isset($article->text) || trim($article->text) === '') {
-            return;
-        }
-
         $articleId = (int) ($article->id ?? 0);
 
         if (isset($this->schemaCache[$articleId])) {
             $this->injectJsonLd($this->schemaCache[$articleId]);
+            return;
+        }
+
+        $schemas = [];
+
+        $localBusinessSchema = $this->buildLocalBusinessSchema($article);
+        if (!empty($localBusinessSchema)) {
+            $schemas[] = $localBusinessSchema;
+        }
+
+        if (!isset($article->text) || trim($article->text) === '') {
+            if (!empty($schemas)) {
+                $this->schemaCache[$articleId] = $schemas;
+                $this->injectJsonLd($schemas);
+            }
+
             return;
         }
 
@@ -69,8 +81,6 @@ class PlgContentSchema extends CMSPlugin
         libxml_clear_errors();
 
         $xpath = new DOMXPath($dom);
-        $schemas = [];
-
         foreach ($xpath->query('//*[@schema]') as $element) {
             $type = strtolower($element->getAttribute('schema'));
 
@@ -123,28 +133,17 @@ class PlgContentSchema extends CMSPlugin
     {
         $faqs = [];
 
-        // Find the nearest accordion context
-        $accordionNodes = $element->getElementsByTagName('ul');
-        $accordion = null;
-
-        foreach ($accordionNodes as $node) {
-            if ($node->hasAttribute('class') && str_contains($node->getAttribute('class'), 'uk-accordion')) {
-                $accordion = $node;
-                break;
-            }
-        }
-
-        if (!$accordion) {
-            $accordion = $xpath->query('.//*[@class[contains(.,"uk-accordion")]]', $element)->item(0);
-        }
+        $accordion = $this->locateAccordionContainer($element, $xpath);
 
         if (!$accordion) {
             return [];
         }
 
-        foreach ($xpath->query('.//li', $accordion) as $item) {
-            $titleNode = $xpath->query('.//*[contains(@class,"uk-accordion-title")]', $item)->item(0);
-            $contentNode = $xpath->query('.//*[contains(@class,"uk-accordion-content")]', $item)->item(0);
+        $items = $this->locateAccordionItems($accordion, $xpath);
+
+        foreach ($items as $item) {
+            $titleNode = $this->queryFirstByClass($xpath, $item, 'uk-accordion-title');
+            $contentNode = $this->queryFirstByClass($xpath, $item, 'uk-accordion-content');
 
             $question = $titleNode ? trim($titleNode->textContent) : '';
             $answer = $contentNode ? trim($this->getInnerHTML($contentNode)) : '';
@@ -277,6 +276,97 @@ class PlgContentSchema extends CMSPlugin
         }
 
         $document->addCustomTag('<script type="application/ld+json">' . $jsonLd . '</script>');
+    }
+
+    /**
+     * Find the accordion container from the schema-marked element.
+     */
+    private function locateAccordionContainer(DOMElement $element, DOMXPath $xpath): ?DOMElement
+    {
+        if ($this->nodeHasClass($element, 'uk-accordion')) {
+            return $element;
+        }
+
+        $container = $xpath->query(
+            'self::*[contains(concat(" ", normalize-space(@class), " "), " uk-accordion ")] | '
+            . './/*[contains(concat(" ", normalize-space(@class), " "), " uk-accordion ")]',
+            $element
+        )->item(0);
+
+        return $container instanceof DOMElement ? $container : null;
+    }
+
+    /**
+     * Collect accordion items in both UL/LI and DIV-based structures.
+     *
+     * @return DOMElement[]
+     */
+    private function locateAccordionItems(DOMElement $accordion, DOMXPath $xpath): array
+    {
+        $items = [];
+
+        foreach ($accordion->childNodes as $child) {
+            if (!$child instanceof DOMElement) {
+                continue;
+            }
+
+            if (
+                $child->tagName === 'li'
+                || $this->nodeHasClass($child, 'el-item')
+                || $this->nodeHasClass($child, 'uk-accordion-item')
+            ) {
+                $items[] = $child;
+            }
+        }
+
+        if (!empty($items)) {
+            return $items;
+        }
+
+        $nodeList = $xpath->query(
+            './/*[contains(concat(" ", normalize-space(@class), " "), " el-item ")'
+            . ' or contains(concat(" ", normalize-space(@class), " "), " uk-accordion-item ")]',
+            $accordion
+        );
+
+        foreach ($nodeList as $node) {
+            if ($node instanceof DOMElement) {
+                $items[] = $node;
+            }
+        }
+
+        if (empty($items)) {
+            foreach ($xpath->query('.//li', $accordion) as $node) {
+                if ($node instanceof DOMElement) {
+                    $items[] = $node;
+                }
+            }
+        }
+
+        return $items;
+    }
+
+    /**
+     * Query for the first descendant with the given class.
+     */
+    private function queryFirstByClass(DOMXPath $xpath, DOMElement $context, string $class): ?DOMElement
+    {
+        $node = $xpath->query(
+            './/*[contains(concat(" ", normalize-space(@class), " "), " ' . $class . ' ")]',
+            $context
+        )->item(0);
+
+        return $node instanceof DOMElement ? $node : null;
+    }
+
+    /**
+     * Determine whether a DOMElement has a specific class name.
+     */
+    private function nodeHasClass(DOMElement $element, string $class): bool
+    {
+        $classes = ' ' . preg_replace('/\s+/', ' ', $element->getAttribute('class')) . ' ';
+
+        return str_contains($classes, ' ' . $class . ' ');
     }
 
     /**
