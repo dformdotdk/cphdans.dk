@@ -51,7 +51,7 @@ final class Schema extends CMSPlugin implements SubscriberInterface
             return;
         }
 
-        $cacheKey = $app->getRouter()->getMode() . ':' . ($app->getMenu()->getActive()?->id ?? '0');
+        $cacheKey = ($app->getMenu()->getActive()?->id ?? '0') . ':' . $app->getUri()->toString();
         if (isset($this->schemaCache[$cacheKey])) {
             $body = $app->getBody();
             $this->injectJsonLd($this->schemaCache[$cacheKey], $body, $app);
