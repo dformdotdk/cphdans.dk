@@ -1,10 +1,10 @@
 <?php
 /**
  * @package     Joomla.Plugin
- * @subpackage  Content.Schema
+ * @subpackage  System.Schema
  */
 
-namespace Joomla\Plugin\Content\Schema;
+namespace Joomla\Plugin\System\Schema;
 
 defined('_JEXEC') or die;
 
@@ -15,18 +15,17 @@ use Joomla\CMS\Application\CMSApplicationInterface;
 use Joomla\CMS\Factory;
 use Joomla\CMS\Log\Log;
 use Joomla\CMS\Plugin\CMSPlugin;
-use Joomla\Component\Fields\Administrator\Helper\FieldsHelper;
 use Throwable;
 
 /**
- * Content plugin to generate JSON-LD schema.org data from markup and configuration.
+ * System plugin to generate JSON-LD schema.org data from page markup and configuration.
  */
-class PlgContentSchema extends CMSPlugin
+class PlgSystemSchema extends CMSPlugin
 {
     /**
-     * Cache of generated schemas keyed by article id.
+     * Cache of generated schemas per-request to avoid duplicate work when rendering modules.
      *
-     * @var array<int, array<string, mixed>>
+     * @var array<string, array<int, array<string, mixed>>>
      */
     private array $schemaCache = [];
 
@@ -38,98 +37,82 @@ class PlgContentSchema extends CMSPlugin
     protected $app;
 
     /**
-     * Handle onContentPrepare to parse schema annotations and inject JSON-LD.
-     *
-     * @param string   $context
-     * @param object   $article
-     * @param mixed    $params
-     * @param integer  $page
-     *
-     * @return void
+     * Collect schema data after rendering the page and inject JSON-LD.
      */
-    public function onContentPrepare(string $context, &$article, &$params, $page = 0): void
+    public function onAfterRender(): void
     {
-        $articleId = (int) ($article->id ?? 0);
+        $app = $this->app ?? Factory::getApplication();
 
-        if (isset($this->schemaCache[$articleId])) {
-            $this->injectJsonLd($this->schemaCache[$articleId]);
+        if ($app->isClient('administrator')) {
             return;
         }
 
+        $cacheKey = $app->getRouter()->getMode() . ':' . ($app->getMenu()->getActive()?->id ?? '0');
+        if (isset($this->schemaCache[$cacheKey])) {
+            $body = $app->getBody();
+            $this->injectJsonLd($this->schemaCache[$cacheKey], $body, $app);
+            return;
+        }
+
+        $body = $app->getBody();
         $schemas = [];
 
-        $localBusinessSchema = $this->buildLocalBusinessSchema($article);
+        $localBusinessSchema = $this->buildLocalBusinessSchema($app);
         if (!empty($localBusinessSchema)) {
             $schemas[] = $localBusinessSchema;
         }
 
-        if (!isset($article->text) || trim($article->text) === '') {
-            if (!empty($schemas)) {
-                $this->schemaCache[$articleId] = $schemas;
-                $this->injectJsonLd($schemas);
-            }
-
-            return;
-        }
-
-        $dom = new DOMDocument();
+        $dom = new DOMDocument('1.0', 'UTF-8');
         libxml_use_internal_errors(true);
-        if (!$dom->loadHTML('<?xml encoding="utf-8" ?>' . $article->text)) {
-            Log::add('Schema plugin: Unable to parse article HTML.', Log::WARNING, 'plg_content_schema');
-            return;
-        }
-        libxml_clear_errors();
 
-        $xpath = new DOMXPath($dom);
-        foreach ($xpath->query('//*[@schema]') as $element) {
-            $type = strtolower($element->getAttribute('schema'));
+        if ($body !== '' && $dom->loadHTML('<?xml encoding="utf-8" ?>' . $body)) {
+            $xpath = new DOMXPath($dom);
 
-            try {
-                $handlerSchema = $this->buildSchemaForType($type, $element, $xpath, $article);
-                if (!empty($handlerSchema)) {
-                    $schemas[] = $handlerSchema;
+            foreach ($xpath->query('//*[@schema]') as $element) {
+                $type = strtolower($element->getAttribute('schema'));
+
+                try {
+                    $schema = $this->buildSchemaForType($type, $element, $xpath);
+
+                    if (!empty($schema)) {
+                        $schemas[] = $schema;
+                    }
+                } catch (Throwable $exception) {
+                    Log::add(
+                        'Schema plugin: Skipping schema type ' . $type . ' due to error: ' . $exception->getMessage(),
+                        Log::WARNING,
+                        'plg_system_schema'
+                    );
                 }
-            } catch (Throwable $exception) {
-                Log::add(
-                    'Schema plugin: Skipping schema type ' . $type . ' due to error: ' . $exception->getMessage(),
-                    Log::WARNING,
-                    'plg_content_schema'
-                );
             }
         }
 
-        $overrides = $this->getArticleOverrides($article);
-        if ($overrides) {
-            $schemas[] = $overrides;
-        }
+        libxml_clear_errors();
 
         if (empty($schemas)) {
             return;
         }
 
-        $this->schemaCache[$articleId] = $schemas;
-        $this->injectJsonLd($schemas);
+        $this->schemaCache[$cacheKey] = $schemas;
+        $this->injectJsonLd($schemas, $body, $app);
     }
 
     /**
      * Build schema for specific type.
      */
-    private function buildSchemaForType(string $type, DOMElement $element, DOMXPath $xpath, object $article): array
+    private function buildSchemaForType(string $type, DOMElement $element, DOMXPath $xpath): array
     {
-        switch ($type) {
-            case 'faq':
-                return $this->buildFaqSchema($element, $xpath, $article);
-            case 'localbusiness':
-                return $this->buildLocalBusinessSchema($article);
-            default:
-                return [];
-        }
+        return match ($type) {
+            'faq' => $this->buildFaqSchema($element, $xpath),
+            'localbusiness' => $this->buildLocalBusinessSchema($this->app ?? Factory::getApplication()),
+            default => [],
+        };
     }
 
     /**
      * Build FAQ schema.org JSON-LD from uk-accordion markup.
      */
-    private function buildFaqSchema(DOMElement $element, DOMXPath $xpath, object $article): array
+    private function buildFaqSchema(DOMElement $element, DOMXPath $xpath): array
     {
         $faqs = [];
 
@@ -142,14 +125,16 @@ class PlgContentSchema extends CMSPlugin
         $items = $this->locateAccordionItems($accordion, $xpath);
 
         foreach ($items as $item) {
-            $titleNode = $this->queryFirstByClass($xpath, $item, 'uk-accordion-title');
-            $contentNode = $this->queryFirstByClass($xpath, $item, 'uk-accordion-content');
+            $titleNode = $this->queryFirstByClass($xpath, $item, 'uk-accordion-title')
+                ?? $this->queryFirstByClass($xpath, $item, 'el-title');
+            $contentNode = $this->queryFirstByClass($xpath, $item, 'uk-accordion-content')
+                ?? $this->queryFirstByClass($xpath, $item, 'el-content');
 
             $question = $titleNode ? trim($titleNode->textContent) : '';
             $answer = $contentNode ? trim($this->getInnerHTML($contentNode)) : '';
 
             if ($question === '' || $answer === '') {
-                Log::add('Schema plugin: Skipping FAQ item with missing title or content.', Log::WARNING, 'plg_content_schema');
+                Log::add('Schema plugin: Skipping FAQ item with missing title or content.', Log::WARNING, 'plg_system_schema');
                 continue;
             }
 
@@ -177,14 +162,14 @@ class PlgContentSchema extends CMSPlugin
     /**
      * Build LocalBusiness schema using plugin parameters.
      */
-    private function buildLocalBusinessSchema(object $article): array
+    private function buildLocalBusinessSchema(CMSApplicationInterface $app): array
     {
         $name = trim((string) $this->params->get('business_name'));
         $logo = trim((string) $this->params->get('business_logo'));
         $description = trim((string) $this->params->get('business_description'));
 
         if ($name === '' || $description === '') {
-            Log::add('Schema plugin: LocalBusiness requires name and description.', Log::WARNING, 'plg_content_schema');
+            Log::add('Schema plugin: LocalBusiness requires name and description.', Log::WARNING, 'plg_system_schema');
             return [];
         }
 
@@ -208,6 +193,7 @@ class PlgContentSchema extends CMSPlugin
             '@type' => 'LocalBusiness',
             'name' => $name,
             'description' => $description,
+            'url' => $app->getUri()->toString(),
         ];
 
         if ($logo !== '') {
@@ -222,60 +208,36 @@ class PlgContentSchema extends CMSPlugin
             $schema['openingHours'] = $openingHours;
         }
 
-        $schema['url'] = $article->canonical ?? $article->link ?? '';
-
         return $schema;
     }
 
     /**
-     * Retrieve article-specific overrides from custom fields.
+     * Inject the JSON-LD payload into the document body.
      */
-    private function getArticleOverrides(object $article): array
-    {
-        if (!isset($article->id)) {
-            return [];
-        }
-
-        try {
-            $fields = FieldsHelper::getFields('com_content.article', $article, true);
-        } catch (Throwable $exception) {
-            Log::add('Schema plugin: Unable to load custom fields. ' . $exception->getMessage(), Log::WARNING, 'plg_content_schema');
-            return [];
-        }
-
-        foreach ($fields as $field) {
-            if ($field->name === 'schema_jsonld' && !empty($field->value)) {
-                $decoded = json_decode($field->value, true);
-                if (json_last_error() !== JSON_ERROR_NONE) {
-                    Log::add('Schema plugin: Invalid JSON in schema_jsonld field.', Log::WARNING, 'plg_content_schema');
-                    return [];
-                }
-
-                return $decoded;
-            }
-        }
-
-        return [];
-    }
-
-    /**
-     * Inject the JSON-LD payload into the document.
-     */
-    private function injectJsonLd(array $schemas): void
+    private function injectJsonLd(array $schemas, string $body, CMSApplicationInterface $app): void
     {
         if (empty($schemas)) {
             return;
         }
 
-        $document = Factory::getApplication()->getDocument();
         $jsonLd = json_encode($schemas, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 
         if ($jsonLd === false) {
-            Log::add('Schema plugin: Failed to encode JSON-LD.', Log::ERROR, 'plg_content_schema');
+            Log::add('Schema plugin: Failed to encode JSON-LD.', Log::ERROR, 'plg_system_schema');
             return;
         }
 
-        $document->addCustomTag('<script type="application/ld+json">' . $jsonLd . '</script>');
+        $scriptTag = '<script type="application/ld+json">' . $jsonLd . '</script>';
+
+        if (stripos($body, '</head>') !== false) {
+            $body = preg_replace('/<\/head>/i', $scriptTag . '\n</head>', $body, 1);
+        } elseif (stripos($body, '</body>') !== false) {
+            $body = preg_replace('/<\/body>/i', $scriptTag . '\n</body>', $body, 1);
+        } else {
+            $body .= $scriptTag;
+        }
+
+        $app->setBody($body);
     }
 
     /**
