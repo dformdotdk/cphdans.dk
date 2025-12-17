@@ -4,8 +4,10 @@
     <author>Auto Generated</author>
     <version>1.0.0</version>
     <description>Generates schema.org JSON-LD for content with YOOtheme support.</description>
+    <namespace path="src">Joomla\Plugin\System\Schema</namespace>
     <files>
-        <filename plugin="schema">schema.php</filename>
+        <folder plugin="schema">services</folder>
+        <folder>src</folder>
         <folder>language</folder>
     </files>
     <languages>

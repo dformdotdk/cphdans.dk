@@ -1,12 +1,12 @@
 <?php
 /**
  * @package     Joomla.Plugin
- * @subpackage  System.Schema
+ * @subpackage  System.schema
  */
 
-namespace Joomla\Plugin\System\Schema;
+namespace Joomla\Plugin\System\Schema\Extension;
 
-defined('_JEXEC') or die;
+\defined('_JEXEC') or die;
 
 use DOMDocument;
 use DOMElement;
@@ -15,12 +15,13 @@ use Joomla\CMS\Application\CMSApplicationInterface;
 use Joomla\CMS\Factory;
 use Joomla\CMS\Log\Log;
 use Joomla\CMS\Plugin\CMSPlugin;
+use Joomla\Event\SubscriberInterface;
 use Throwable;
 
 /**
  * System plugin to generate JSON-LD schema.org data from page markup and configuration.
  */
-class PlgSystemSchema extends CMSPlugin
+final class Schema extends CMSPlugin implements SubscriberInterface
 {
     /**
      * Cache of generated schemas per-request to avoid duplicate work when rendering modules.
@@ -30,18 +31,21 @@ class PlgSystemSchema extends CMSPlugin
     private array $schemaCache = [];
 
     /**
-     * Application instance.
-     *
-     * @var CMSApplicationInterface
+     * Returns events the plugin listens to.
      */
-    protected $app;
+    public static function getSubscribedEvents(): array
+    {
+        return [
+            'onAfterRender' => 'onAfterRender',
+        ];
+    }
 
     /**
      * Collect schema data after rendering the page and inject JSON-LD.
      */
     public function onAfterRender(): void
     {
-        $app = $this->app ?? Factory::getApplication();
+        $app = $this->getApplication() ?? Factory::getApplication();
 
         if ($app->isClient('administrator')) {
             return;
@@ -54,7 +58,7 @@ class PlgSystemSchema extends CMSPlugin
             return;
         }
 
-        $body = $app->getBody();
+        $body    = $app->getBody();
         $schemas = [];
 
         $localBusinessSchema = $this->buildLocalBusinessSchema($app);
@@ -104,7 +108,7 @@ class PlgSystemSchema extends CMSPlugin
     {
         return match ($type) {
             'faq' => $this->buildFaqSchema($element, $xpath),
-            'localbusiness' => $this->buildLocalBusinessSchema($this->app ?? Factory::getApplication()),
+            'localbusiness' => $this->buildLocalBusinessSchema($this->getApplication() ?? Factory::getApplication()),
             default => [],
         };
     }
@@ -131,7 +135,7 @@ class PlgSystemSchema extends CMSPlugin
                 ?? $this->queryFirstByClass($xpath, $item, 'el-content');
 
             $question = $titleNode ? trim($titleNode->textContent) : '';
-            $answer = $contentNode ? trim($this->getInnerHTML($contentNode)) : '';
+            $answer   = $contentNode ? trim($this->getInnerHTML($contentNode)) : '';
 
             if ($question === '' || $answer === '') {
                 Log::add('Schema plugin: Skipping FAQ item with missing title or content.', Log::WARNING, 'plg_system_schema');
@@ -164,8 +168,8 @@ class PlgSystemSchema extends CMSPlugin
      */
     private function buildLocalBusinessSchema(CMSApplicationInterface $app): array
     {
-        $name = trim((string) $this->params->get('business_name'));
-        $logo = trim((string) $this->params->get('business_logo'));
+        $name        = trim((string) $this->params->get('business_name'));
+        $logo        = trim((string) $this->params->get('business_logo'));
         $description = trim((string) $this->params->get('business_description'));
 
         if ($name === '' || $description === '') {
@@ -174,10 +178,10 @@ class PlgSystemSchema extends CMSPlugin
         }
 
         $address = array_filter([
-            'streetAddress' => trim((string) $this->params->get('business_street')),
-            'postalCode' => trim((string) $this->params->get('business_postal')),
+            'streetAddress'   => trim((string) $this->params->get('business_street')),
+            'postalCode'      => trim((string) $this->params->get('business_postal')),
             'addressLocality' => trim((string) $this->params->get('business_city')),
-            'addressCountry' => trim((string) $this->params->get('business_country')),
+            'addressCountry'  => trim((string) $this->params->get('business_country')),
         ]);
 
         $openingHours = [];
@@ -189,11 +193,11 @@ class PlgSystemSchema extends CMSPlugin
         }
 
         $schema = [
-            '@context' => 'https://schema.org',
-            '@type' => 'LocalBusiness',
-            'name' => $name,
+            '@context'    => 'https://schema.org',
+            '@type'       => 'LocalBusiness',
+            'name'        => $name,
             'description' => $description,
-            'url' => $app->getUri()->toString(),
+            'url'         => $app->getUri()->toString(),
         ];
 
         if ($logo !== '') {
@@ -230,9 +234,9 @@ class PlgSystemSchema extends CMSPlugin
         $scriptTag = '<script type="application/ld+json">' . $jsonLd . '</script>';
 
         if (stripos($body, '</head>') !== false) {
-            $body = preg_replace('/<\/head>/i', $scriptTag . '\n</head>', $body, 1);
+            $body = preg_replace('/<\/head>/i', $scriptTag . "\n</head>", $body, 1);
         } elseif (stripos($body, '</body>') !== false) {
-            $body = preg_replace('/<\/body>/i', $scriptTag . '\n</body>', $body, 1);
+            $body = preg_replace('/<\/body>/i', $scriptTag . "\n</body>", $body, 1);
         } else {
             $body .= $scriptTag;
         }
