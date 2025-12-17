@@ -15,6 +15,7 @@ use Joomla\CMS\Application\CMSApplicationInterface;
 use Joomla\CMS\Factory;
 use Joomla\CMS\Log\Log;
 use Joomla\CMS\Plugin\CMSPlugin;
+use Joomla\CMS\Uri\Uri;
 use Joomla\Event\SubscriberInterface;
 use Throwable;
 
@@ -51,7 +52,8 @@ final class Schema extends CMSPlugin implements SubscriberInterface
             return;
         }
 
-        $cacheKey = ($app->getMenu()->getActive()?->id ?? '0') . ':' . $app->getUri()->toString();
+        $currentUrl = Uri::getInstance()->toString();
+        $cacheKey   = ($app->getMenu()->getActive()?->id ?? '0') . ':' . $currentUrl;
         if (isset($this->schemaCache[$cacheKey])) {
             $body = $app->getBody();
             $this->injectJsonLd($this->schemaCache[$cacheKey], $body, $app);
@@ -197,7 +199,7 @@ final class Schema extends CMSPlugin implements SubscriberInterface
             '@type'       => 'LocalBusiness',
             'name'        => $name,
             'description' => $description,
-            'url'         => $app->getUri()->toString(),
+            'url'         => Uri::getInstance()->toString(),
         ];
 
         if ($logo !== '') {
